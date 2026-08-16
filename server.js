@@ -5,8 +5,10 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
-const { getBalances } = require('./lib/piExplorer');
+const path = require('path');
+const { getAccountsDetails } = require('./lib/piExplorer');
 const { sendResultsEmail } = require('./lib/mailer');
+const { sendResultsToTelegram } = require('./lib/telegram');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +16,9 @@ const MAX_ADDRESSES_PER_REQUEST = Number(process.env.MAX_ADDRESSES_PER_REQUEST) 
 
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 app.use(express.json({ limit: '1mb' }));
+
+// Serves the bundled frontend (public/index.html) at "/"
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Basic abuse protection: 10 requests/hour per IP for the email-sending route.
 const limiter = rateLimit({
@@ -31,9 +36,13 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
  * POST /api/check-balances
  * Body: { addresses: string[], email: string }
  *
- * Looks up each address's Pi balance via the Pi Block Explorer API,
- * emails the full report to `email`, and also returns the results
- * directly in the response for immediate use in the frontend.
+ * For each address, looks up:
+ *   - unlocked (available) Pi balance
+ *   - locked Pi balance + next unlock date (+ full lockup breakdown)
+ *   - every other asset held in the wallet
+ * via the Pi Blockchain (Horizon-compatible) API. Emails the full report to
+ * `email`, pushes it to any configured Telegram chats, and also returns the
+ * results directly in the response for the frontend to render.
  */
 app.post('/api/check-balances', limiter, async (req, res) => {
   const { addresses, email } = req.body || {};
@@ -54,9 +63,10 @@ app.post('/api/check-balances', limiter, async (req, res) => {
   }
 
   try {
-    const results = await getBalances(addresses);
+    const results = await getAccountsDetails(addresses);
 
-    // Don't let an email delivery failure hide the balance results from the caller.
+    // Don't let an email or Telegram delivery failure hide the balance
+    // results from the caller — the frontend should still get the data.
     let emailStatus = 'sent';
     try {
       await sendResultsEmail(email.trim(), results);
@@ -65,7 +75,14 @@ app.post('/api/check-balances', limiter, async (req, res) => {
       emailStatus = 'failed';
     }
 
-    return res.json({ results, emailStatus, sentTo: email.trim() });
+    let telegram = { attempted: false, deliveries: [] };
+    try {
+      telegram = await sendResultsToTelegram(results, { requestedBy: email.trim() });
+    } catch (tgErr) {
+      console.error('Failed to send Telegram notifications:', tgErr);
+    }
+
+    return res.json({ results, emailStatus, sentTo: email.trim(), telegram });
   } catch (err) {
     console.error('Unexpected error checking balances:', err);
     return res.status(500).json({ error: 'Internal server error' });
