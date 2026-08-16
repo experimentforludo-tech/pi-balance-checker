@@ -57,13 +57,10 @@
 <body>
 
 <h1>Pi Wallet Balance Checker</h1>
-<p class="sub">Paste Pi wallet addresses (one per line), enter an email, and get a report by email, Telegram, and right here.</p>
+<p class="sub">Paste Pi wallet addresses (one per line) — the report goes to your configured email(s) and Telegram, and shows here too.</p>
 
 <label for="addresses">Wallet addresses (one per line)</label>
 <textarea id="addresses" placeholder="GABCDEF...&#10;GXYZQWE..."></textarea>
-
-<label for="email">Email to send the report to</label>
-<input id="email" type="email" placeholder="you@example.com" />
 
 <button id="submitBtn">Check Balances</button>
 
@@ -72,10 +69,14 @@
 <div id="resultsWrap"></div>
 
 <script>
-  const API_URL = '/api/check-balances'; // same origin; change if frontend is hosted separately
+  const API_URL = 'https://your-backend.up.railway.app/api/check-balances';
+  // ^ REQUIRED: replace with your deployed backend's URL.
+  // This frontend is a standalone static file — it does not need to be
+  // hosted on the same site/domain as the backend. Just make sure the
+  // backend's ALLOWED_ORIGIN env var includes wherever this file ends up
+  // being served from (e.g. https://your-frontend.netlify.app).
 
   const $addresses = document.getElementById('addresses');
-  const $email = document.getElementById('email');
   const $btn = document.getElementById('submitBtn');
   const $status = document.getElementById('status');
   const $delivery = document.getElementById('deliveryInfo');
@@ -151,11 +152,17 @@
 
   function renderDelivery(data) {
     const parts = [];
-    parts.push(`Email: ${data.emailStatus === 'sent' ? '✅ sent to ' + data.sentTo : '❌ failed'}`);
+    if (data.email && data.email.attempted) {
+      parts.push(data.email.error
+        ? `Email: ❌ ${data.email.error}`
+        : `Email: ✅ sent to ${data.email.sentTo.join(', ')}`);
+    } else {
+      parts.push('Email: not configured');
+    }
     if (data.telegram && data.telegram.attempted) {
       const sent = data.telegram.deliveries.filter(d => d.status === 'sent').length;
       const total = data.telegram.deliveries.length;
-      parts.push(`Telegram: ${sent}/${total} chats notified`);
+      parts.push(`Telegram: ${sent}/${total} targets notified`);
     } else {
       parts.push('Telegram: not configured');
     }
@@ -163,18 +170,18 @@
   }
 
   $btn.addEventListener('click', async () => {
+    if (API_URL.includes('your-backend.up.railway.app')) {
+      setStatus('Set API_URL at the top of the <script> tag to your deployed backend URL first.', 'error');
+      return;
+    }
+
     const addresses = $addresses.value
       .split('\n')
       .map(a => a.trim())
       .filter(Boolean);
-    const email = $email.value.trim();
 
     if (addresses.length === 0) {
       setStatus('Add at least one wallet address.', 'error');
-      return;
-    }
-    if (!email) {
-      setStatus('Enter an email address.', 'error');
       return;
     }
 
@@ -187,7 +194,7 @@
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addresses, email }),
+        body: JSON.stringify({ addresses }),
       });
       const data = await res.json();
 
